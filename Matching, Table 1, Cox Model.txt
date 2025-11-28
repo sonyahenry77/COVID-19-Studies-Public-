@@ -1,0 +1,244 @@
+# COVID-19 and New-Onset COPD: Propensity Score Matching Analysis
+# Matched cohort study comparing hospitalized and non-hospitalized COVID-19 patients to non-COVID controls
+
+library(MatchIt)
+library(cobalt)
+library(survival)
+library(dplyr)
+library(tidyr)
+
+# ============================================================================
+# DATA PREPARATION
+# ============================================================================
+
+df <- read.csv("/content/All_data_needed_news.csv")
+
+df$category <- trimws(tolower(df$category))
+df <- subset(df, COPD != 1 & !is.na(COPD))
+df$category <- factor(df$category,
+                      levels = c("non_covid", "covid_hosp", "covid_nonhosp"))
+
+# ============================================================================
+# MATCH 1: COVID+ HOSPITALIZED vs NON-COVID
+# ============================================================================
+
+df_hosp <- subset(df, category %in% c("covid_hosp", "non_covid"))
+df_hosp$treat <- factor(ifelse(df_hosp$category == "covid_hosp", 1, 0), levels = c(0, 1))
+table(df_hosp$treat)
+
+form_hosp <- treat ~ AGE + Gndrbool + black_non + white_non + Hisp + other_race +
+                      obesity + smoking + hypertension + diabetes1 + diabetes2 +
+                      CKD + liver_disease + CHF + CAD + MI +
+                      Asthma + Osa + pulhp + vaccinated
+
+m_hosp <- matchit(form_hosp,
+                  data = df_hosp,
+                  method = "nearest",
+                  ratio = 1,
+                  caliper = 0.2)
+
+summary(m_hosp)
+love.plot(m_hosp, abs = TRUE, threshold = 0.1)
+
+matched_hosp <- match.data(m_hosp)
+
+write.csv(matched_hosp, 
+          file = "/content/matched_covid_hosp_vs_noncovid.csv",
+          row.names = FALSE)
+
+cox_hosp <- coxph(Surv(Persontime, NEW_ONSET_COPD) ~ treat,
+                  data = matched_hosp)
+summary(cox_hosp)
+
+# ============================================================================
+# MATCH 2: COVID+ NON-HOSPITALIZED vs NON-COVID
+# ============================================================================
+
+df_nonhosp <- subset(df, category %in% c("covid_nonhosp", "non_covid"))
+df_nonhosp$treat <- factor(ifelse(df_nonhosp$category == "covid_nonhosp", 1, 0), levels = c(0, 1))
+table(df_nonhosp$treat)
+
+form_nonhosp <- treat ~ AGE + Gndrbool + black_non + white_non + Hisp + other_race +
+                         obesity + smoking + hypertension + diabetes1 + diabetes2 +
+                         CKD + liver_disease + CHF + CAD + MI +
+                         Asthma + Osa + pulhp  + vaccinated
+
+m_nonhosp <- matchit(form_nonhosp,
+                     data = df_nonhosp,
+                     method = "nearest",
+                     ratio = 1,
+                     caliper = 0.2)
+
+summary(m_nonhosp)
+love.plot(m_nonhosp, abs = TRUE, threshold = 0.1)
+
+matched_nonhosp <- match.data(m_nonhosp)
+
+write.csv(matched_nonhosp,
+          file = "/content/matched_covid_nonhosp_vs_noncovid.csv",
+          row.names = FALSE)
+
+cox_nonhosp <- coxph(Surv(Persontime, NEW_ONSET_COPD) ~ treat,
+                     data = matched_nonhosp)
+summary(cox_nonhosp)
+
+# ============================================================================
+# OPTIONAL: SAVE MATCHING IDs
+# ============================================================================
+
+print("Column names in matched_hosp:")
+print(names(matched_hosp))
+
+id_col <- names(matched_hosp)[grep("person|id|ID|Person", names(matched_hosp), ignore.case = TRUE)][1]
+
+if (!is.na(id_col)) {
+  matching_cols <- c(id_col, "treat", "category", "weights", "subclass", "distance")
+  matching_cols <- matching_cols[matching_cols %in% names(matched_hosp)]
+  
+  matched_hosp_subset <- matched_hosp[, matching_cols]
+  write.csv(matched_hosp_subset,
+            file = "/content/matched_hosp_IDs.csv",
+            row.names = FALSE)
+  
+  matched_nonhosp_subset <- matched_nonhosp[, matching_cols]
+  write.csv(matched_nonhosp_subset,
+            file = "/content/matched_nonhosp_IDs.csv",
+            row.names = FALSE)
+} else {
+  print("Could not find person ID column. Saving all columns.")
+}
+
+# ============================================================================
+# TABLE 1: BASELINE CHARACTERISTICS
+# ============================================================================
+
+calculate_smd <- function(x1, x2) {
+  mean1 <- mean(x1, na.rm = TRUE)
+  mean2 <- mean(x2, na.rm = TRUE)
+  var1 <- var(x1, na.rm = TRUE)
+  var2 <- var(x2, na.rm = TRUE)
+  pooled_sd <- sqrt((var1 + var2) / 2)
+  smd <- (mean1 - mean2) / pooled_sd
+  return(abs(smd))
+}
+
+create_table1 <- function(data, group_var, label1, label2) {
+  
+  group1 <- data[data[[group_var]] == 1, ]
+  group2 <- data[data[[group_var]] == 0, ]
+  
+  n1 <- nrow(group1)
+  n2 <- nrow(group2)
+  
+  results <- data.frame(
+    Characteristic = character(),
+    Group1_stat = character(),
+    Group2_stat = character(),
+    SMD = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Age
+  age_mean1 <- mean(group1$AGE, na.rm = TRUE)
+  age_sd1 <- sd(group1$AGE, na.rm = TRUE)
+  age_mean2 <- mean(group2$AGE, na.rm = TRUE)
+  age_sd2 <- sd(group2$AGE, na.rm = TRUE)
+  age_smd <- calculate_smd(group1$AGE, group2$AGE)
+  
+  results <- rbind(results, data.frame(
+    Characteristic = "Age, Mean (SD)",
+    Group1_stat = sprintf("%.2f (%.2f)", age_mean1, age_sd1),
+    Group2_stat = sprintf("%.2f (%.2f)", age_mean2, age_sd2),
+    SMD = round(age_smd, 3)
+  ))
+  
+  # Binary variables
+  vars_binary <- list(
+    list(var = "Gndrbool", label = "Male"),
+    list(var = "black_non", label = "Black"),
+    list(var = "white_non", label = "White"),
+    list(var = "Hisp", label = "Hispanic"),
+    list(var = "other_race", label = "Other race"),
+    list(var = "obesity", label = "Obesity"),
+    list(var = "smoking", label = "Smoking"),
+    list(var = "hypertension", label = "Hypertension"),
+    list(var = "diabetes1", label = "Diabetes Type 1"),
+    list(var = "diabetes2", label = "Diabetes Type 2"),
+    list(var = "CKD", label = "Chronic Kidney Disease"),
+    list(var = "liver_disease", label = "Liver Disease"),
+    list(var = "CHF", label = "Congestive Heart Failure"),
+    list(var = "CAD", label = "Coronary Artery Disease"),
+    list(var = "MI", label = "Myocardial Infarction"),
+    list(var = "Asthma", label = "Asthma"),
+    list(var = "Osa", label = "Obstructive Sleep Apnea"),
+    list(var = "pulhp", label = "Pulmonary Hypertension"),
+    list(var = "vaccinated", label = "Vaccinated")
+  )
+  
+  for (v in vars_binary) {
+    if (v$var %in% names(data)) {
+      n1_var <- sum(group1[[v$var]] == 1, na.rm = TRUE)
+      pct1 <- (n1_var / n1) * 100
+      n2_var <- sum(group2[[v$var]] == 1, na.rm = TRUE)
+      pct2 <- (n2_var / n2) * 100
+      
+      smd <- calculate_smd(group1[[v$var]], group2[[v$var]])
+      
+      results <- rbind(results, data.frame(
+        Characteristic = v$label,
+        Group1_stat = sprintf("%d (%.1f)", n1_var, pct1),
+        Group2_stat = sprintf("%d (%.1f)", n2_var, pct2),
+        SMD = round(smd, 3)
+      ))
+    }
+  }
+  
+  # Outcome
+  outcome1 <- sum(group1$NEW_ONSET_COPD == 1, na.rm = TRUE)
+  outcome2 <- sum(group2$NEW_ONSET_COPD == 1, na.rm = TRUE)
+  
+  results <- rbind(results, data.frame(
+    Characteristic = "New Onset COPD",
+    Group1_stat = as.character(outcome1),
+    Group2_stat = as.character(outcome2),
+    SMD = NA
+  ))
+  
+  colnames(results) <- c("Characteristic", 
+                          paste0(label1, " (n=", format(n1, big.mark=","), ")"),
+                          paste0(label2, " (n=", format(n2, big.mark=","), ")"),
+                          "SMD")
+  
+  return(results)
+}
+
+# Generate tables
+table1_hosp <- create_table1(matched_hosp, "treat", 
+                              "COVID+ Hosp", "Non-COVID")
+
+table1_nonhosp <- create_table1(matched_nonhosp, "treat",
+                                 "COVID+ Non-Hosp", "Non-COVID")
+
+table1_combined <- merge(
+  table1_hosp,
+  table1_nonhosp,
+  by = "Characteristic",
+  all = TRUE,
+  suffixes = c("_Hosp", "_NonHosp")
+)
+
+print(table1_hosp)
+print(table1_nonhosp)
+print(table1_combined)
+
+write.csv(table1_hosp, 
+          file = "/content/table1_hospitalized_vs_noncovid.csv",
+          row.names = FALSE)
+
+write.csv(table1_nonhosp,
+          file = "/content/table1_nonhospitalized_vs_noncovid.csv",
+          row.names = FALSE)
+
+write.csv(table1_combined,
+          file = "/content/table1_combined.csv",
+          row.names = FALSE)
